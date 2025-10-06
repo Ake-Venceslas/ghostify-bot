@@ -27,9 +27,20 @@ function loadCommands() {
         try {
             const fullPath = path.join(commandFolder, file);
             delete require.cache[require.resolve(fullPath)]; // évite le cache
-            const command = require(fullPath);
-            commands.set(command.name, command);
-            console.log(`[CommandLoader] Commande chargée : ${command.name}`);
+            let command = require(fullPath);
+            // Support CommonJS and transpiled ESM default exports
+            if (command && command.__esModule && command.default) command = command.default;
+
+            const inferredName = path.basename(file, '.js');
+            const commandName = command && command.name ? command.name : inferredName;
+
+            if (!command || typeof command.run !== 'function') {
+                console.error(`[CommandLoader] Erreur chargement ${file}: module invalide (pas de propriété run)`);
+                return;
+            }
+
+            commands.set(commandName, command);
+            console.log(`[CommandLoader] Commande chargée : ${commandName}${command.name ? '' : ' (nom inféré depuis le fichier)'}`);
         } catch (err) {
             console.error(`[CommandLoader] Erreur chargement ${file}:`, err);
         }
