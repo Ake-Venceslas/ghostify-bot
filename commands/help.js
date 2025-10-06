@@ -21,6 +21,15 @@ module.exports = {
 
         const text = `📜 *Liste des commandes disponibles :*\n\n${commandList}`;
 
-        await sock.sendMessage(from, { text });
+        // Envoie l'image logo.jpg avec la liste des commandes
+        const logoPath = path.join(__dirname, "..", "mugi.jpg");
+        if (fs.existsSync(logoPath)) {
+            await sock.sendMessage(from, {
+                image: { url: logoPath },
+                caption: text
+            });
+        } else {
+            await sock.sendMessage(from, { text: text + "\n\n⚠️ Logo non trouvé (logo.jpg)" });
+        }
     }
 };
