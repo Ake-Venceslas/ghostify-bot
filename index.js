@@ -12,7 +12,6 @@ const AUTH_FOLDER = path.join(__dirname, "auth_info");
 const PREFIX = "!";
 const BOT_NAME = "GHOSTIFY BOT";
 const BOT_TAG = `*${BOT_NAME}* 👨🏻‍💻`;
-const TARGET_NUMBER = "237687474776"; // Numéro cible
 
 let latestQR = null; // QR actuel
 
