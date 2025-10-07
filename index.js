@@ -1,6 +1,16 @@
-// index.js
+// ===============================
+//  GHOSTIFY BOT - MultiSession Ready ⚡
+//  Auteur : Mr. Kuete
+// ===============================
+
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, jidDecode } = require('@whiskeysockets/baileys');
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    jidDecode
+} = require('@whiskeysockets/baileys');
 const QRCode = require("qrcode");
 const pino = require("pino");
 const fs = require("fs");
@@ -8,42 +18,45 @@ const path = require("path");
 const db = require('./database');
 const startTime = new Date();
 
-const AUTH_FOLDER = path.join(__dirname, "auth_info");
+// --- CONFIG ---
+const SESSIONS_FOLDER = path.join(__dirname, "sessions"); // nouveau dossier
+if (!fs.existsSync(SESSIONS_FOLDER)) fs.mkdirSync(SESSIONS_FOLDER);
+
 const PREFIX = "!";
 const BOT_NAME = "GHOSTIFY BOT";
 const BOT_TAG = `*${BOT_NAME}* 👨🏻‍💻`;
 
 let latestQR = null; // QR actuel
 
-// --- Loader commandes ---
+// --- Chargement des commandes dynamiques ---
 const commands = new Map();
 const commandFolder = path.join(__dirname, 'commands');
 if (!fs.existsSync(commandFolder)) fs.mkdirSync(commandFolder);
 
 function loadCommands() {
     commands.clear();
-    fs.readdirSync(commandFolder).filter(f => f.endsWith('.js')).forEach(file => {
-        try {
-            const fullPath = path.join(commandFolder, file);
-            delete require.cache[require.resolve(fullPath)]; // évite le cache
-            let command = require(fullPath);
-            // Support CommonJS and transpiled ESM default exports
-            if (command && command.__esModule && command.default) command = command.default;
+    fs.readdirSync(commandFolder)
+        .filter(f => f.endsWith('.js'))
+        .forEach(file => {
+            try {
+                const fullPath = path.join(commandFolder, file);
+                delete require.cache[require.resolve(fullPath)];
+                let command = require(fullPath);
+                if (command && command.__esModule && command.default) command = command.default;
+                const inferredName = path.basename(file, '.js');
+                const commandName = command?.name || inferredName;
 
-            const inferredName = path.basename(file, '.js');
-            const commandName = command && command.name ? command.name : inferredName;
+                if (!command || typeof command.run !== 'function') {
+                    console.error(`[CommandLoader] Erreur: ${file} n'a pas de fonction run()`);
+                    return;
+                }
 
-            if (!command || typeof command.run !== 'function') {
-                console.error(`[CommandLoader] Erreur chargement ${file}: module invalide (pas de propriété run)`);
-                return;
+                commands.set(commandName, command);
+                console.log(`[CommandLoader] ✅ Commande chargée : ${commandName}`);
+            } catch (err) {
+                console.error(`[CommandLoader] ❌ Erreur lors du chargement de ${file}:`, err);
             }
-
-            commands.set(commandName, command);
-            console.log(`[CommandLoader] Commande chargée : ${commandName}${command.name ? '' : ' (nom inféré depuis le fichier)'}`);
-        } catch (err) {
-            console.error(`[CommandLoader] Erreur chargement ${file}:`, err);
-        }
-    });
+        });
 }
 loadCommands();
 
@@ -55,7 +68,13 @@ function replyWithTag(sock, jid, quoted, text) {
 function getMessageText(msg) {
     const m = msg.message;
     if (!m) return "";
-    return m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || "";
+    return (
+        m.conversation ||
+        m.extendedTextMessage?.text ||
+        m.imageMessage?.caption ||
+        m.videoMessage?.caption ||
+        ""
+    );
 }
 
 // --- Chargement du MP3 principal ---
@@ -64,19 +83,19 @@ try {
     const mp3Path = path.join(__dirname, 'fichier.mp3');
     if (fs.existsSync(mp3Path)) {
         mp3Buffer = fs.readFileSync(mp3Path);
-        console.log('[MP3] fichier.mp3 chargé.');
+        console.log('[MP3] ✅ fichier.mp3 chargé.');
     } else {
-        console.warn('[MP3] fichier.mp3 introuvable.');
+        console.warn('[MP3] ⚠ fichier.mp3 introuvable.');
     }
 } catch (err) {
-    console.error('[MP3] Erreur lecture fichier.mp3:', err);
+    console.error('[MP3] ❌ Erreur lecture fichier.mp3:', err);
 }
 
 // --- Démarrage du bot ---
 async function startBot() {
-    console.log("Démarrage du bot WhatsApp...");
+    console.log("🚀 Démarrage du bot WhatsApp...");
     const { version } = await fetchLatestBaileysVersion();
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+    const { state, saveCreds } = await useMultiFileAuthState(SESSIONS_FOLDER); // 🔥 gestion multi session
 
     const sock = makeWASocket({
         version,
@@ -85,18 +104,23 @@ async function startBot() {
         printQRInTerminal: false,
     });
 
+    // --- Gestion de la connexion ---
     sock.ev.on("connection.update", update => {
         const { connection, lastDisconnect, qr } = update;
+
         if (qr) {
             latestQR = qr;
-            console.log("[QR] Nouveau QR généré. Ouvrez http://localhost:3000/qr pour le scanner.");
+            console.log("[QR] Nouveau QR généré. Accédez à 👉 http://localhost:3000/qr pour le scanner.");
         }
+
         if (connection === "close") {
-            if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) startBot();
-            else console.log("Déconnecté, supprime auth_info pour reconnecter manuellement.");
+            const code = lastDisconnect?.error?.output?.statusCode;
+            console.log("⚠ Connexion fermée :", code);
+            if (code !== DisconnectReason.loggedOut) startBot();
+            else console.log("❌ Déconnecté. Supprime le dossier sessions/ pour reconnecter.");
         } else if (connection === "open") {
             latestQR = null;
-            console.log("✅ Bot connecté !");
+            console.log("✅ Bot connecté à WhatsApp !");
         }
     });
 
@@ -116,22 +140,22 @@ async function startBot() {
         const text = getMessageText(msg);
         const isGroup = remoteJid.endsWith('@g.us');
 
-        // --- Détection mention ou numéro ---
-        const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid?.some(jid => jid.split('@')[0] === TARGET_NUMBER);
-        const containsNumber = text.includes(TARGET_NUMBER);
-        const sendMp3 = mentioned || containsNumber;
-
-        if (isGroup && mp3Buffer && sendMp3) {
-            try {
-                await sock.sendMessage(remoteJid, { audio: mp3Buffer, mimetype: 'audio/mpeg', fileName: 'fichier.mp3' }, { quoted: msg });
+        // --- Envoi auto d’un mp3 si mention ---
+        if (isGroup && mp3Buffer && text.includes('bot')) {
+                try {
+                await sock.sendMessage(remoteJid, {
+                    audio: mp3Buffer,
+                    mimetype: 'audio/mpeg',
+                    fileName: 'fichier.mp3'
+                }, { quoted: msg });
                 console.log(`[MP3] fichier.mp3 envoyé à ${senderId}`);
             } catch (err) {
                 console.error('[MP3] Erreur lors de l\'envoi:', err);
             }
         }
 
-        // --- Commande !downloadbot intégrée ---
-        if (text.toLowerCase() === `${PREFIX}downloadbot`) {
+        // --- Commande spéciale !downloadbot ---
+    if (text.toLowerCase() === `${PREFIX}downloadbot`) {
             const mp3Files = ['fichier1.mp3', 'fichier2.mp3', 'fichier3.mp3'];
             for (const file of mp3Files) {
                 const mp3Path = path.join(__dirname, file);
@@ -156,9 +180,8 @@ async function startBot() {
             }
         }
 
-        // --- Gestion des autres commandes ---
+        // --- Commandes dynamiques ---
         if (!text.startsWith(PREFIX)) return;
-
         const args = text.slice(PREFIX.length).trim().split(/\s+/);
         const commandName = args.shift()?.toLowerCase();
         if (!commandName || !commands.has(commandName)) return;
@@ -176,60 +199,29 @@ async function startBot() {
 
             await command.run({ sock, msg, args, replyWithTag, commands, db });
             await db.incrementCommandCount(senderId);
-
         } catch (err) {
             console.error(`[ERREUR] Commande "${commandName}" :`, err);
-            try { await replyWithTag(sock, remoteJid, msg, "❌ Une erreur est survenue."); } catch {}
-        }
-    });
-
-    // --- Exécuter extract sur certaines réactions (view-once inclus) ---
-    sock.ev.on('messages.reaction', async ({ reactions }) => {
-        try {
-            if (!reactions || reactions.length === 0) return;
-
-            const validReactions = ['❤️', '😂', '😍', '👍'];
-
-            for (const reaction of reactions) {
-                if (!validReactions.includes(reaction.text)) continue;
-
-                const reactorJid = reaction.key.participant || reaction.key.remoteJid;
-                const remoteJid = reaction.key.remoteJid;
-
-                // Charger le message original (plus fiable que reaction.message)
-                const originalMsg = await sock.loadMessage(remoteJid, reaction.key.id);
-                if (!originalMsg) continue;
-
-                const extractCommand = commands.get('extract');
-                if (extractCommand) {
-                    await extractCommand.run({
-                        sock,
-                        msg: originalMsg,
-                        replyWithTag: async (s, jid, _, text) => {
-                            await s.sendMessage(reactorJid, { text });
-                        }
-                    });
-                    console.log(`[REACT] Média extrait pour ${reactorJid} (réaction : ${reaction.text})`);
-                }
-            }
-        } catch (err) {
-            console.error('[REACT] Erreur lors du traitement d’une réaction :', err.message);
+            try { await replyWithTag(sock, remoteJid, msg, "❌ Une erreur est survenue."); } catch { }
         }
     });
 }
 
-// --- Serveur web ---
+// --- Serveur Express pour QR ---
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send({ status: "online", botName: BOT_NAME, uptime: (new Date() - startTime)/1000 }));
+app.get('/', (req, res) => res.send({
+    status: "online",
+    botName: BOT_NAME,
+    uptime: (new Date() - startTime) / 1000
+}));
 
-// Route HTML QR avec auto-refresh
+// --- Page QR ---
 app.get("/qr", async (req, res) => {
     res.send(`
         <html>
         <head>
-            <title>QR WhatsApp</title>
+            <title>Connexion ${BOT_NAME}</title>
             <style>
                 body { display:flex; justify-content:center; align-items:center; height:100vh; flex-direction:column; font-family:sans-serif; }
                 img { width:300px; height:300px; margin:20px; }
@@ -250,7 +242,7 @@ app.get("/qr", async (req, res) => {
                         if(data.qr) {
                             img.style.display = "block";
                             img.src = data.qr;
-                            status.innerText = "📲 Scannez ce QR";
+                            status.innerText = "📲 Scannez ce QR pour connecter votre compte WhatsApp";
                         } else {
                             img.style.display = "none";
                             status.innerText = "✅ Bot déjà connecté";
@@ -258,14 +250,14 @@ app.get("/qr", async (req, res) => {
                     } catch(err) { console.error(err); }
                 }
                 fetchQR();
-                setInterval(fetchQR, 50000);
+                setInterval(fetchQR, 10000);
             </script>
         </body>
         </html>
     `);
 });
 
-// Endpoint qui renvoie le QR en JSON
+// --- Endpoint JSON du QR ---
 app.get("/qr-data", async (req, res) => {
     if (!latestQR) return res.json({ qr: null });
     try {
@@ -276,7 +268,8 @@ app.get("/qr-data", async (req, res) => {
     }
 });
 
-app.listen(PORT, () => { 
-    console.log(`[WebServer] Démarré sur port ${PORT}`); 
-    startBot(); 
+// --- Lancement du serveur ---
+app.listen(PORT, () => {
+    console.log(`[WebServer] 🌐 Serveur web lancé sur le port ${PORT}`);
+    startBot();
 });
