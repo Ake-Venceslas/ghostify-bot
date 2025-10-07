@@ -2,6 +2,9 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const ytdl = require('ytdl-core');
+const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+const ffmpeg = require('fluent-ffmpeg');
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 const ytSearch = require('yt-search');
 
 module.exports = {
@@ -24,45 +27,60 @@ module.exports = {
             if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
             const tempFile = path.join(tempDir, `music_${Date.now()}.mp3`);
 
-            // Try download with retries and better format selection
+            // Try download with ffmpeg conversion; streaming ytdl into ffmpeg avoids some 410 issues
             const maxAttempts = 3;
             let lastErr = null;
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
                     console.log(`[PLAY] Tentative ${attempt} - ${video.url} (${video.title})`);
 
-                    // Get info and choose an audio-only format with highest bitrate
-                    const info = await ytdl.getInfo(video.url);
-                    const formats = info.formats
-                        .filter(f => f.hasAudio && !f.hasVideo && f.container && f.container !== 'webm')
-                        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+                    // Use a direct ytdl stream (audio only) with robust headers
+                    const ytdlOptions = {
+                        filter: 'audioonly',
+                        quality: 'highestaudio',
+                        highWaterMark: 1 << 25,
+                        requestOptions: {
+                            headers: {
+                                // use a common browser UA to reduce chance of 410 from remote
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117 Safari/537.36'
+                            }
+                        }
+                    };
 
-                    const chosen = formats.length > 0 ? formats[0] : null;
-                    const streamOptions = chosen ? { quality: chosen.itag } : { filter: 'audioonly', quality: 'highestaudio' };
+                    const audioStream = ytdl(video.url, ytdlOptions);
 
-                    const audioStream = ytdl.downloadFromInfo(info, streamOptions);
-                    const writeStream = fs.createWriteStream(tempFile);
-                    audioStream.pipe(writeStream);
-
+                    // Pipe through ffmpeg to produce an MP3 file
                     await new Promise((resolve, reject) => {
-                        writeStream.on('finish', resolve);
-                        writeStream.on('error', reject);
-                        audioStream.on('error', reject);
+                        const proc = ffmpeg(audioStream)
+                            .audioCodec('libmp3lame')
+                            .audioBitrate(128)
+                            .format('mp3')
+                            .on('error', (err) => {
+                                reject(err);
+                            })
+                            .on('end', () => resolve())
+                            .save(tempFile);
                     });
 
                     // Send audio
                     await sock.sendMessage(from, { audio: { url: tempFile }, mimetype: 'audio/mpeg' }, { quoted: msg });
 
                     // Cleanup
-                    if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+                    try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch (e) { }
                     console.log('[PLAY] Envoi terminé');
                     lastErr = null;
                     break; // success
                 } catch (err) {
-                    console.error(`[PLAY] Erreur tentative ${attempt}:`, err && err.message ? err.message : err);
+                    // Special-case status 410 (resource gone); try a short backoff and retry
+                    const msgErr = err && err.message ? err.message : String(err);
+                    console.error(`[PLAY] Erreur tentative ${attempt}:`, msgErr);
                     lastErr = err;
-                    // small backoff before retry
-                    await new Promise(r => setTimeout(r, 800 * attempt));
+                    if (msgErr.includes('Status code 410')) {
+                        // wait a little longer before retrying
+                        await new Promise(r => setTimeout(r, 1500 * attempt));
+                    } else {
+                        await new Promise(r => setTimeout(r, 800 * attempt));
+                    }
                 }
             }
 
@@ -70,6 +88,7 @@ module.exports = {
                 console.error('[PLAY] Toutes les tentatives ont échoué');
                 const msgErr = lastErr.message || String(lastErr);
                 await replyWithTag(sock, from, msg, `❌ Impossible de télécharger la musique : ${msgErr}`);
+                try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch (e) { }
             }
         } catch (err) {
             console.error('[PLAY] Erreur :', err);
