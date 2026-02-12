@@ -1,2 +1,6 @@
 node_modules/
 sessions/
+.env
+*.db
+data.json
+temp/
