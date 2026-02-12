@@ -1,7 +1,11 @@
 // ===============================
 //  GHOSTIFY BOT - MultiSession Ready ⚡
 //  Auteur : Mr. Kuete
+//  Version : 1.1.0 - Production Ready
 // ===============================
+
+// Charger les variables d'environnement en premier
+require('dotenv').config();
 
 const express = require('express');
 const {
@@ -16,7 +20,25 @@ const pino = require("pino");
 const fs = require("fs");
 const path = require("path");
 const db = require('./database');
+const { initOpenAI, generateResponse, isAIAvailable } = require('./ai');
 const startTime = new Date();
+
+// ============================================
+// Gestionnaires d'erreurs globaux (anti-crash)
+// ============================================
+process.on('uncaughtException', (error) => {
+    console.error('💥 [CRASH PREVENTED] Uncaught Exception:', error.message);
+    console.error(error.stack);
+    // Ne pas quitter - continuer à fonctionner
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('💥 [CRASH PREVENTED] Unhandled Promise Rejection:', reason);
+    // Ne pas quitter - continuer à fonctionner
+});
+
+// Initialiser OpenAI
+initOpenAI();
 
 // --- CONFIG ---
 const SESSIONS_FOLDER = path.join(__dirname, "sessions"); // nouveau dossier
@@ -105,7 +127,7 @@ async function startBot() {
     });
 
     // --- Gestion de la connexion ---
-    sock.ev.on("connection.update", update => {
+    sock.ev.on("connection.update", async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -115,12 +137,28 @@ async function startBot() {
 
         if (connection === "close") {
             const code = lastDisconnect?.error?.output?.statusCode;
-            console.log("⚠ Connexion fermée :", code);
-            if (code !== DisconnectReason.loggedOut) startBot();
-            else console.log("❌ Déconnecté. Supprime le dossier sessions/ pour reconnecter.");
+            const reason = DisconnectReason[code] || code;
+            console.log(`⚠️ Connexion fermée - Raison: ${reason} (code: ${code})`);
+            
+            if (code === DisconnectReason.loggedOut) {
+                console.log("❌ Déconnecté définitivement. Supprime le dossier sessions/ pour reconnecter.");
+            } else {
+                // Reconnexion automatique avec délai
+                const delay = 5000;
+                console.log(`🔄 Reconnexion dans ${delay/1000} secondes...`);
+                setTimeout(() => {
+                    console.log("🔄 Tentative de reconnexion...");
+                    startBot();
+                }, delay);
+            }
         } else if (connection === "open") {
             latestQR = null;
-            console.log("✅ Bot connecté à WhatsApp !");
+            console.log("");
+            console.log("═══════════════════════════════════════");
+            console.log(`✅ ${BOT_NAME} connecté à WhatsApp !`);
+            console.log("═══════════════════════════════════════");
+            console.log("📝 Le bot répond quand il est mentionné avec @");
+            console.log("");
         }
     });
 
@@ -140,19 +178,89 @@ async function startBot() {
         const text = getMessageText(msg);
         const isGroup = remoteJid.endsWith('@g.us');
 
-        // --- Envoi auto d’un mp3 si mention ---
-        if (isGroup && mp3Buffer && text.includes('bot')) {
+        // --- Réponse AI si le bot est mentionné avec @ ---
+        if (isGroup) {
+            // Vérifier si le bot est mentionné via les métadonnées Baileys
+            const botJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+            const botNumber = sock.user.id.split(':')[0];
+            
+            // Baileys stocke les mentions dans contextInfo.mentionedJid
+            const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+            const isMentionedInMeta = mentionedJids.some(jid => jid.includes(botNumber));
+            
+            // Aussi vérifier si @numéro apparaît dans le texte
+            const mentionPattern = new RegExp(`@${botNumber}`, 'i');
+            const isMentionedInText = mentionPattern.test(text);
+            
+            const isBotMentioned = isMentionedInMeta || isMentionedInText;
+
+            if (isBotMentioned && text.trim()) {
+                console.log(`[AI] 🔔 Bot mentionné par ${msg.pushName || 'inconnu'}`);
+                console.log(`[AI] 📝 Message: "${text}"`);
+                console.log(`[AI] 🔧 AI disponible: ${isAIAvailable()}`);
+                
+                // Vérifier si l'AI est disponible
+                if (!isAIAvailable()) {
+                    console.log('[AI] ⚠️ OpenAI non configuré - OPENAI_API_KEY manquant dans .env');
+                    await sock.sendMessage(remoteJid, { 
+                        text: `${BOT_TAG}\n\n⚠️ L'IA n'est pas configurée. Le fichier .env avec OPENAI_API_KEY est requis.` 
+                    }, { quoted: msg });
+                    return;
+                }
+
                 try {
-                await sock.sendMessage(remoteJid, {
-                    audio: mp3Buffer,
-                    mimetype: 'audio/mpeg',
-                    fileName: 'fichier.mp3'
-                }, { quoted: msg });
-                console.log(`[MP3] fichier.mp3 envoyé à ${senderId}`);
-            } catch (err) {
-                console.error('[MP3] Erreur lors de l\'envoi:', err);
+                    // Nettoyer le message - retirer la mention @
+                    let cleanedMessage = text.replace(/@\d+/g, '').trim();
+                    if (!cleanedMessage) cleanedMessage = 'Salut !';
+
+                    const userName = msg.pushName || 'Quelqu\'un';
+                    console.log(`[AI] 📨 ${userName}: ${cleanedMessage}`);
+
+                    // Indicateur de frappe (non-bloquant)
+                    sock.sendPresenceUpdate('composing', remoteJid).catch(() => {});
+
+                    // Générer la réponse AI
+                    const startTime = Date.now();
+                    const result = await generateResponse(cleanedMessage, senderId, userName);
+                    console.log(`[AI] ⏱️ Temps total: ${Date.now() - startTime}ms`);
+
+                    // Arrêter l'indicateur de frappe (non-bloquant)
+                    sock.sendPresenceUpdate('paused', remoteJid).catch(() => {});
+
+                    if (result.success) {
+                        console.log(`[AI] 📤 Réponse envoyée à ${userName}`);
+                        await sock.sendMessage(remoteJid, { 
+                            text: `${BOT_TAG}\n\n${result.response}` 
+                        }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(remoteJid, { 
+                            text: `${BOT_TAG}\n\n${result.error}` 
+                        }, { quoted: msg });
+                    }
+                } catch (err) {
+                    console.error('[AI] Erreur:', err.message);
+                    try {
+                        await sock.sendMessage(remoteJid, { 
+                            text: `${BOT_TAG}\n\nOups ! Une erreur est survenue. 😅` 
+                        }, { quoted: msg });
+                    } catch { }
+                }
             }
         }
+
+        // --- Envoi auto d'un mp3 si "bot" est mentionné (optionnel, désactivé par défaut) ---
+        // if (isGroup && mp3Buffer && text.toLowerCase().includes('bot')) {
+        //     try {
+        //         await sock.sendMessage(remoteJid, {
+        //             audio: mp3Buffer,
+        //             mimetype: 'audio/mpeg',
+        //             fileName: 'fichier.mp3'
+        //         }, { quoted: msg });
+        //         console.log(`[MP3] fichier.mp3 envoyé à ${senderId}`);
+        //     } catch (err) {
+        //         console.error('[MP3] Erreur lors de l\'envoi:', err);
+        //     }
+        // }
 
         // --- Commande spéciale !downloadbot ---
     if (text.toLowerCase() === `${PREFIX}downloadbot`) {
@@ -268,8 +376,23 @@ app.get("/qr-data", async (req, res) => {
     }
 });
 
+// ============================================
+// Gestionnaires d'arrêt gracieux
+// ============================================
+process.on('SIGINT', () => {
+    console.log('\n🛑 Arrêt gracieux en cours...');
+    console.log('👋 Au revoir !');
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n🛑 SIGTERM reçu. Arrêt...');
+    process.exit(0);
+});
+
 // --- Lancement du serveur ---
 app.listen(PORT, () => {
     console.log(`[WebServer] 🌐 Serveur web lancé sur le port ${PORT}`);
+    console.log(`[WebServer] 📱 Page QR: http://localhost:${PORT}/qr`);
     startBot();
 });

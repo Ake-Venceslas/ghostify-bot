@@ -1,74 +1,89 @@
-// database.js
-const Database = require('better-sqlite3');
-const db = new Database('./bot.db');
-const log = require('./logger')(module); // Utilise le logger pour la cohérence
+// database.js - Stockage JSON simple (pas de compilation requise)
+const fs = require('fs');
+const path = require('path');
+const log = require('./logger')(module);
 
-try {
-    db.prepare(`
-        CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            firstSeen TEXT,
-            commandCount INTEGER DEFAULT 0
-        )
-    `).run();
-    log('Connexion à SQLite (better-sqlite3) réussie.');
-} catch (err) {
-    console.error('Erreur initialisation DB:', err);
-    throw err;
+const DB_FILE = path.join(__dirname, 'data.json');
+
+// Structure de données
+let data = {
+    users: {}
+};
+
+// Charger les données au démarrage
+function loadData() {
+    try {
+        if (fs.existsSync(DB_FILE)) {
+            const raw = fs.readFileSync(DB_FILE, 'utf8');
+            data = JSON.parse(raw);
+            log('Base de données JSON chargée.');
+        } else {
+            saveData();
+            log('Base de données JSON créée.');
+        }
+    } catch (err) {
+        console.error('Erreur chargement DB:', err);
+        data = { users: {} };
+    }
 }
 
-function getOrRegisterUser(userId, name) {
-    return new Promise((resolve, reject) => {
-        try {
-            const row = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
-            if (row) return resolve(row);
+// Sauvegarder les données
+function saveData() {
+    try {
+        fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
+    } catch (err) {
+        console.error('Erreur sauvegarde DB:', err);
+    }
+}
 
-            const firstSeen = new Date().toISOString();
-            db.prepare('INSERT INTO users (id, name, firstSeen) VALUES (?, ?, ?)').run(userId, name, firstSeen);
-            log(`Nouvel utilisateur enregistré : ${name} (${userId})`);
-            resolve({ id: userId, name, firstSeen, commandCount: 0 });
-        } catch (err) {
-            reject(err);
+// Initialisation
+loadData();
+
+function getOrRegisterUser(userId, name) {
+    return new Promise((resolve) => {
+        if (data.users[userId]) {
+            return resolve(data.users[userId]);
         }
+
+        const user = {
+            id: userId,
+            name: name,
+            firstSeen: new Date().toISOString(),
+            commandCount: 0
+        };
+
+        data.users[userId] = user;
+        saveData();
+        log(`Nouvel utilisateur enregistré : ${name} (${userId})`);
+        resolve(user);
     });
 }
 
 function incrementCommandCount(userId) {
-    return new Promise((resolve, reject) => {
-        try {
-            db.prepare('UPDATE users SET commandCount = commandCount + 1 WHERE id = ?').run(userId);
-            resolve();
-        } catch (err) {
-            reject(err);
+    return new Promise((resolve) => {
+        if (data.users[userId]) {
+            data.users[userId].commandCount++;
+            saveData();
         }
+        resolve();
     });
 }
 
 function getTotalUsers() {
-    return new Promise((resolve, reject) => {
-        try {
-            const row = db.prepare('SELECT COUNT(*) as count FROM users').get();
-            resolve(row.count || 0);
-        } catch (err) {
-            reject(err);
-        }
+    return new Promise((resolve) => {
+        resolve(Object.keys(data.users).length);
     });
 }
 
 function getTotalCommands() {
-    return new Promise((resolve, reject) => {
-        try {
-            const row = db.prepare('SELECT COALESCE(SUM(commandCount), 0) as total FROM users').get();
-            resolve(row.total || 0);
-        } catch (err) {
-            reject(err);
-        }
+    return new Promise((resolve) => {
+        const total = Object.values(data.users).reduce(
+            (sum, user) => sum + (user.commandCount || 0), 0
+        );
+        resolve(total);
     });
 }
 
-
-// --- ON S'ASSURE QU'ELLES SONT BIEN EXPORTÉES ---
 module.exports = {
     getOrRegisterUser,
     incrementCommandCount,
